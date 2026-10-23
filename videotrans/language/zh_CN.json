@@ -1,5 +1,11 @@
 {
   "&Help": "帮助/关于(&H)",
+  "resegment_mode_title": "智能断句模式",
+  "resegment_mode_notice": "local=本地规则断句(无需联网); llm=LLM语义断句(使用高级设置中LLM纠错渠道,未配置密钥或调用失败时自动降级为本地规则)",
+  "llm_split_cjk_len_title": "LLM断句中文单行字数",
+  "llm_split_cjk_len_notice": "LLM语义断句时每行最大中文字数",
+  "llm_split_en_len_title": "LLM断句英文单行词数",
+  "llm_split_en_len_notice": "LLM语义断句时每行最大英文单词数",
   "&RECOGNsetting": "语音识别设置(&R)",
   "&Setting": "翻译设置(&S)",
   "&TTSsetting": "TTS设置(&E)",

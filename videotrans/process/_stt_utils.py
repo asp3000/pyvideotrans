@@ -149,6 +149,17 @@ no_resegment: 如果存在不重新断句 no_resegment.txt ,则直接返回模�
 
 def _resegment(texts, language='en', max_speech_ms=6000, min_speech_ms=3000, logs_file=None,no_resegment=False) -> List[SrtItem]:
     if not texts: return []
+    # 智能断句调度：高级设置 resegment_mode 决定 LLM 断句或本地规则断句，
+    # LLM 未配置/失败自动降级；智能断句异常则返回 None 回退到下方原有逻辑
+    if not no_resegment:
+        try:
+            from videotrans.process.semantic_split import smart_resegment
+            _smart = smart_resegment(texts, language, logs_file=logs_file)
+            if _smart is not None:
+                return _smart
+        except Exception as _e:
+            import logging
+            logging.getLogger('VideoTrans').warning(f'智能断句调度失败，回退原断句逻辑: {_e}')
     srt_output = []
     _write_log(logs_file, json.dumps({"type": "logs", "text": f'Resegment:start'}))
     # 最长可能句子: max_speech_ms  + min_speech_ms

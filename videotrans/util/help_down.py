@@ -288,6 +288,23 @@ def down_file_from_hf(local_dir, urls=None, callback=None) -> bool:
     return True
 
 
+def _safe_unlink(p: Path, retries: int = 5, delay: float = 0.6) -> bool:
+    """安全删除文件：被占用时等待+GC后重试，避免 WinError 32 直接崩溃"""
+    import gc
+    for _ in range(retries):
+        try:
+            if p.exists():
+                p.unlink()
+            return True
+        except PermissionError:
+            gc.collect()
+            time.sleep(delay)
+        except OSError:
+            break
+    logger.warning(f'临时文件删除失败(忽略): {p}')
+    return False
+
+
 def down_zip(local_dir, zip_url, callback=None) -> bool:
     Path(local_dir).mkdir(parents=True, exist_ok=True)
     from videotrans.configure.excepts import DownloadModelsError
@@ -308,93 +325,110 @@ def down_zip(local_dir, zip_url, callback=None) -> bool:
     # 文件名带 .downloading 后缀 实现“断点续传”
     temp_zip_path = Path(local_dir) / f"{filename}.downloading"
     session = requests.Session()
-    retries = 0
-    while retries < max_retries:
-        try:
-            headers = {}
-            downloaded_size = 0
 
-            # 检查是否有未完成的临时 zip 文件，有则尝试断点续传
-            if temp_zip_path.exists():
-                downloaded_size = temp_zip_path.stat().st_size
-                if downloaded_size > 0:
-                    headers['Range'] = f'bytes={downloaded_size}-'
-
-            with session.get(zip_url, headers=headers, stream=True, timeout=(15, 30), proxies=proxy,
-                             verify=False) as response:
-                if response.status_code not in (200, 206):
-                    response.raise_for_status()
-
-                # 判断源站是否支持 206 Range 续传
-                if response.status_code == 206:
-                    mode = 'ab'  # 追加
-                    remaining = response.headers.get('content-length')
-                    total_length = (downloaded_size + int(remaining)) if remaining else None
-                else:
-                    mode = 'wb'  # 覆盖
+    # 全局锁：避免多任务并发下载/解压同一 zip 导致文件占用或数据错乱
+    with download_lock:
+        # 外层循环：解压发现 zip 损坏(BadZipFile)时，删档后从头重新下载
+        # 最多 3 轮；断点续传拼出的数据本身可疑，必须丢弃重下
+        for download_round in range(1, 4):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    headers = {}
                     downloaded_size = 0
-                    total_length = response.headers.get('content-length')
-                    total_length = int(total_length) if total_length else None
 
-                with open(temp_zip_path, mode) as dest_file_obj:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            dest_file_obj.write(chunk)
-                            downloaded_size += len(chunk)
+                    # 检查是否有未完成的临时 zip 文件，有则尝试断点续传
+                    if temp_zip_path.exists():
+                        downloaded_size = temp_zip_path.stat().st_size
+                        if downloaded_size > 0:
+                            headers['Range'] = f'bytes={downloaded_size}-'
 
-                            if callback:
-                                if total_length:
-                                    file_percent = min(99.0, (downloaded_size / total_length) * 100)
-                                    callback(f'{tr("Download Models")} {filename} {file_percent:.2f}%')
-                                else:
-                                    mb_size = downloaded_size / (1024 * 1024)
-                                    callback(f'{tr("Download Models")} {filename} {mb_size:.1f}MB')
+                    with session.get(zip_url, headers=headers, stream=True, timeout=(15, 30), proxies=proxy,
+                                     verify=False) as response:
+                        if response.status_code not in (200, 206):
+                            response.raise_for_status()
 
-                # 确保 Zip 文件已被完全接收
-                if total_length is not None and downloaded_size < total_length:
-                    raise ConnectionError(f"Zip下载不完整：预期 {total_length} 字节，实际收到 {downloaded_size} 字节")
-                break
-        except Exception as e:
-            retries += 1
-            logger.warning(f'Zip下载[{filename}]发生异常: {e}，正在进行第 ({retries}/{max_retries}) 次重试...')
-            if retries >= max_retries:
+                        # 判断源站是否支持 206 Range 续传
+                        if response.status_code == 206:
+                            mode = 'ab'  # 追加
+                            remaining = response.headers.get('content-length')
+                            total_length = (downloaded_size + int(remaining)) if remaining else None
+                        else:
+                            mode = 'wb'  # 覆盖
+                            downloaded_size = 0
+                            total_length = response.headers.get('content-length')
+                            total_length = int(total_length) if total_length else None
+
+                        with open(temp_zip_path, mode) as dest_file_obj:
+                            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                                if chunk:
+                                    dest_file_obj.write(chunk)
+                                    downloaded_size += len(chunk)
+
+                                    if callback:
+                                        if total_length:
+                                            file_percent = min(99.0, (downloaded_size / total_length) * 100)
+                                            callback(f'{tr("Download Models")} {filename} {file_percent:.2f}%')
+                                        else:
+                                            mb_size = downloaded_size / (1024 * 1024)
+                                            callback(f'{tr("Download Models")} {filename} {mb_size:.1f}MB')
+
+                        # 确保 Zip 文件已被完全接收
+                        if total_length is not None and downloaded_size < total_length:
+                            raise ConnectionError(f"Zip下载不完整：预期 {total_length} 字节，实际收到 {downloaded_size} 字节")
+                    break
+                except Exception as e:
+                    retries += 1
+                    logger.warning(f'Zip下载[{filename}]发生异常: {e}，正在进行第 ({retries}/{max_retries}) 次重试...')
+                    if retries >= max_retries:
+                        msg = tr('model is missing. Please download it', local_dir)
+                        if callback:
+                            callback(f'Error:{msg}')
+                        _safe_unlink(temp_zip_path)
+                        raise DownloadModelsError(f"{msg}\n[{zip_url}]\n多次重试后仍然失败: {e}")
+
+                    # 指数退避
+                    time.sleep(min(2 ** retries, 30))
+
+            # === 校验并解压 Zip 文件 ===
+            extracted_names = []
+            try:
+                if callback:
+                    callback('Extracting zip...')
+                with zipfile.ZipFile(temp_zip_path, 'r') as zf:
+                    extracted_names = [n for n in zf.namelist() if not n.endswith('/')]
+                    zf.extractall(path=local_dir)
+                if callback:
+                    callback('Downloaded end')
+                logger.debug(f'下载并解压完毕:{filename}')
+
+                _safe_unlink(temp_zip_path)
+                return True
+
+            except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError) as e:
+                # zip 损坏：清理已解出的残留文件 + 删除临时文件，从头重新下载
+                logger.warning(f'Zip文件损坏(第{download_round}轮): {e}，删除后重新下载')
+                if callback:
+                    callback(f'Corrupted zip, redownloading... [{download_round}/3]')
+                for n in extracted_names:
+                    try:
+                        target = Path(local_dir) / n
+                        if target.is_file():
+                            target.unlink()
+                    except OSError:
+                        pass
+                _safe_unlink(temp_zip_path)
+                continue
+
+            except Exception as e:
+                _safe_unlink(temp_zip_path)
                 msg = tr('model is missing. Please download it', local_dir)
                 if callback:
                     callback(f'Error:{msg}')
-                raise DownloadModelsError(f"{msg}\n[{zip_url}]\n多次重试后仍然失败: {e}")
+                raise DownloadModelsError(f"{msg}\n[{zip_url}]\n{e}")
 
-            # 指数退避
-            time.sleep(min(2 ** retries, 30))
-
-    # === 校验并解压 Zip 文件 ===
-    try:
-        if callback:
-            callback('Extracting zip...')
-        with zipfile.ZipFile(temp_zip_path, 'r') as zf:
-            zf.extractall(path=local_dir)
-        if callback:
-            callback('Downloaded end')
-        logger.debug(f'下载并解压完毕:{filename}')
-
-        if temp_zip_path.exists():
-            temp_zip_path.unlink()
-
-        return True
-
-    except zipfile.BadZipFile as e:
-        # 如果 Zip 损坏，立即删除坏文件
-        if temp_zip_path.exists():
-            temp_zip_path.unlink()
-        msg = tr('model is missing. Please download it', local_dir)
-        if callback:
-            callback(f'Error: Corrupted zip file')
-        raise DownloadModelsError(f"{msg}\n[{zip_url}]\n{e}")
-
-    except Exception as e:
-        msg = tr('model is missing. Please download it', local_dir)
-        if callback:
-            callback(f'Error:{msg}')
-        raise DownloadModelsError(f"{msg}\n[{zip_url}]\n{e}")
+    msg = tr('model is missing. Please download it', local_dir)
+    raise DownloadModelsError(f"{msg}\n[{zip_url}]\n3轮下载后zip仍损坏，请检查网络稳定性")
 
 
 # 从 modelscope.cn 下载完整模型

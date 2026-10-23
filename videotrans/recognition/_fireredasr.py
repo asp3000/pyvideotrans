@@ -25,7 +25,8 @@ class FireredRecogn(BaseRecogn):
         decoder = f"{self.local_dir}/decoder.int8.onnx"
         tokens = f"{self.local_dir}/tokens.txt"
 
-        return  sherpa_onnx.OfflineRecognizer.from_fire_red_asr(
+        return self._create_sherpa_recognizer(
+                sherpa_onnx.OfflineRecognizer.from_fire_red_asr,
                 decoder=decoder,
                 encoder=encoder,
                 tokens=tokens,
@@ -34,7 +35,12 @@ class FireredRecogn(BaseRecogn):
             )
             
     def _download(self):
-        if not Path(f'{self.local_dir}/encoder.int8.onnx').exists():
+        # 三个文件全部存在且非空才视为完整，防止解压中断留下截断文件
+        _need_files = ['encoder.int8.onnx', 'decoder.int8.onnx', 'tokens.txt']
+        if not all(
+            (p := Path(f'{self.local_dir}/{f}')).exists() and p.stat().st_size > 0
+            for f in _need_files
+        ):
             from videotrans.util import help_down
             help_down.down_zip(f"{ROOT_DIR}/models",
                            FIRERED_URL_MS if not is_connect_hf() else FIRERED_URL_HF,
@@ -45,6 +51,10 @@ class FireredRecogn(BaseRecogn):
         if self._exit(): return
         # 发送请求
         raws = self.cut_audio()
+        # 无任何语音片段(纯静音/无有效语音)时直接返回空结果,不应视为错误
+        if not raws:
+            logger.warning(f'VAD切分为0个片段,音频可能为纯静音:{self.audio_file}')
+            return []
         err=''
         ok_nums=0
         recognizer = self._create_recognizer()

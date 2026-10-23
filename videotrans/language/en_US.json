@@ -1,5 +1,11 @@
 {
   "&Help": "Help / About (&H)",
+  "resegment_mode_title": "Smart re-segmentation mode",
+  "resegment_mode_notice": "local=local rule-based split (offline); llm=LLM semantic split (uses the LLM channel in advanced settings, auto falls back to local rules if not configured or fails)",
+  "llm_split_cjk_len_title": "LLM split max CJK chars",
+  "llm_split_cjk_len_notice": "Max CJK characters per line for LLM semantic split",
+  "llm_split_en_len_title": "LLM split max English words",
+  "llm_split_en_len_notice": "Max English words per line for LLM semantic split",
   "&RECOGNsetting": "Speech Recognition Settings (&R)",
   "&Setting": "Translation Settings (&S)",
   "&TTSsetting": "TTS Settings (&E)",

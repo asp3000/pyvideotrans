@@ -2,7 +2,7 @@
 import os
 import shutil
 
-from videotrans.configure.config import ROOT_DIR, app_cfg, settings
+from videotrans.configure.config import ROOT_DIR, app_cfg, settings, logger
 from videotrans.task.taskcfg import InputFile
 import unicodedata
 from pathlib import Path
@@ -12,20 +12,12 @@ def send_notification(title, message):
     if app_cfg.exec_mode == 'cli':
         print(f'\n*****[{title}]: {message}*****\n')
         return
+    # GUI 模式下不再发送系统通知：
+    # plyer 的 Windows 通知实现每次调用都会创建一个临时托盘图标窗口，
+    # 进程内销毁不彻底，会在系统托盘残留大量 ghost 图标(鼠标悬停后才消失)
     if app_cfg.exit_soft or settings.get('dont_notify', False):
         return
-    from plyer import notification
-    try:
-        notification.notify(
-            title=title[:60],
-            message=message[:120],
-            ticker="pyVideoTrans",
-            app_name="pyVideoTrans",
-            app_icon=ROOT_DIR + '/videotrans/styles/icon.ico',
-            timeout=10
-        )
-    except Exception:
-        pass
+    logger.debug(f'通知已禁用(GUI模式不创建托盘图标): [{title}] {message}')
 
 
 def format_video(name, target_dir=None)->InputFile:

@@ -6,7 +6,7 @@ from videotrans.translator import LLM_CONCERT_DICT
 
 ComboBox_List = ['cuda_com_type', 'llm_ai_type', 'vad_type', 'speaker_type', 'video_codec', 'preset', 'lang',
                  'uvr_models', 'out_video_ext', "fps_mode", "device_name", "model_for_recogn2",
-                 "remove_dubb_silence_level","noise_model"]
+                 "remove_dubb_silence_level", "noise_model", "resegment_mode"]
 
 ComboBox_Data = {
     "cuda_com_type": [
@@ -43,6 +43,7 @@ ComboBox_Data = {
         'UVR-MDX-NET-Inst_3'
     ],
     "out_video_ext": ['.mp4', '.mkv'],
+    "resegment_mode": ['local', 'llm'],
     "device_name": ['auto', 'cuda', 'cpu', 'mps', 'xpu', 'cuda:0', 'cuda:1', 'cuda:2', 'cuda:3'],
     "model_for_recogn2": WHISPER_MODELS.split(','),
     "remove_dubb_silence_level": ["low", "default", "max"],
@@ -68,8 +69,8 @@ notices = {
                 'min_silence_duration_ms', 'model_for_recogn2', 'max_speech_duration_s2', 'min_speech_duration_ms2',
                 'speaker_type', 'hf_token', 'cuda_com_type', 'beam_size', 'best_of', 'condition_on_previous_text',
                 'temperature', 'repetition_penalty', 'compression_ratio_threshold', 'hotwords', 'gemini_recogn_chunk',
-                'zh_hant_s', 'del_end_punc', 'asr_wait'],
-    'trans': ['trans_thread', 'aitrans_thread', 'translation_wait',  'ultimate_mini', 'aitrans_temperature', 'aitrans_context'],
+                'zh_hant_s', 'del_end_punc', 'asr_wait', 'resegment_mode'],
+    'trans': ['trans_thread', 'aitrans_thread', 'translation_wait', 'ultimate_mini', 'llm_chunk_size', 'llm_ai_type','llm_resegment',  'aitrans_temperature', 'aitrans_context'],
     'dubbing': ['dubbing_thread', 'dubbing_wait', 'remove_dubb_silence', 'remove_dubb_all_silence',
                 'remove_dubb_silence_level', 'save_segment_audio', 'normal_text', 'edgetts_max_concurrent_tasks',
                 'edgetts_retry_nums'],

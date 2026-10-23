@@ -24,7 +24,8 @@ class OmnilingualRecogn(BaseRecogn):
         model = f"{self.local_dir}/model.int8.onnx"
         tokens = f"{self.local_dir}/tokens.txt"
 
-        return  sherpa_onnx.OfflineRecognizer.from_omnilingual_asr_ctc(
+        return self._create_sherpa_recognizer(
+                sherpa_onnx.OfflineRecognizer.from_omnilingual_asr_ctc,
                 model=model,
                 tokens=tokens,
                 debug=False,
@@ -43,6 +44,10 @@ class OmnilingualRecogn(BaseRecogn):
         if self._exit(): return
         # 发送请求
         raws = self.cut_audio()
+        # 无任何语音片段(纯静音/无有效语音)时直接返回空结果,不应视为错误
+        if not raws:
+            logger.warning(f'VAD切分为0个片段,音频可能为纯静音:{self.audio_file}')
+            return []
         err=''
         ok_nums=0
         recognizer = self._create_recognizer()

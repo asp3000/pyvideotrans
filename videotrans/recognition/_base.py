@@ -212,6 +212,18 @@ class BaseRecogn(BaseCon):
     # 若需下载模型，子类需实现
     def _download(self):
         pass
+
+    # sherpa-onnx 系渠道公共: 按 is_cuda 决定 provider,CUDA初始化失败自动回退CPU
+    def _create_sherpa_recognizer(self, factory, **kw):
+        provider = 'cuda' if getattr(self, 'is_cuda', False) else 'cpu'
+        try:
+            return factory(provider=provider, **kw)
+        except Exception as e:
+            if provider == 'cuda':
+                logger.warning(f'sherpa-onnx CUDA初始化失败, 回退CPU: {e}')
+                return factory(provider='cpu', **kw)
+            raise
+
     # 有些识别渠道需要预先使用VAD切割为合适时长的音频片段，然后再对片段识别，每个识别结果即为一条字幕
     # whisper模型并且没有选中预先分割，无需切割
     def _vad_split(self):

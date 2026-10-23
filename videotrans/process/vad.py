@@ -2,8 +2,29 @@ import time
 import traceback
 import numpy as np
 import scipy.io.wavfile as Wavfile
-from ten_vad import TenVad
 from videotrans.configure.config import logger
+
+
+def _split_oversize_segments(segments, max_ms):
+    """将超长片段按 max_ms 均匀硬切，防止识别引擎(全注意力encoder)内存爆炸。
+    硬切点位于连续语音中间，字幕会在切点断开，但时间戳精度不受影响。"""
+    if not max_ms or max_ms <= 0:
+        return segments
+    result = []
+    for s, e in segments:
+        duration = e - s
+        if duration <= max_ms * 1.5:
+            result.append([s, e])
+            continue
+        nums = int(np.ceil(duration / max_ms))
+        step = duration / nums
+        logger.warning(
+            f"[VAD] 超长片段 {duration / 1000:.1f}s 强制切分为 {nums} 段: [{s}ms - {e}ms]")
+        for j in range(nums):
+            _s = int(s + j * step)
+            _e = int(s + (j + 1) * step) if j < nums - 1 else e
+            result.append([_s, _e])
+    return result
 
 
 
@@ -39,10 +60,40 @@ def get_speech_timestamp_silero(input_wav,
     audio_data = decode_audio(input_wav, sampling_rate=sampling_rate)
     total_audio_duration_ms = int(len(audio_data) / sampling_rate * 1000)
 
+    # 低音量自动增益: 远场/低音量录音(如RMS<-30dB)会导致VAD完全检测不到语音
+    # 按RMS归一化(峰值限幅),只影响检测阶段，不改变时间戳
+    _rms = float(np.sqrt(np.mean(audio_data ** 2))) if len(audio_data) else 0.0
+    if 0 < _rms < 0.03:
+        _gain = min(0.06 / _rms, 20.0)
+        audio_data = np.clip(audio_data * _gain, -1.0, 1.0)
+        logger.warning(f'[silero-VAD] 低音量音频自动增益 x{_gain:.1f} (RMS {_rms:.4f}->{min(_rms * _gain, 0.06):.4f})')
+
     raw_chunks = get_speech_timestamps(
         audio_data, vad_options=VadOptions(**vad_p)
     )
     if not raw_chunks:
+        # 降阈值重试
+        for _th in (threshold * 0.7, 0.2):
+            _th = max(0.1, min(threshold, _th))
+            if _th >= threshold:
+                continue
+            vad_p['threshold'] = _th
+            logger.warning(f'[silero-VAD] 未检测到语音, 降低阈值重试 threshold={_th}')
+            raw_chunks = get_speech_timestamps(
+                audio_data, vad_options=VadOptions(**vad_p)
+            )
+            if raw_chunks:
+                break
+    if not raw_chunks:
+        # 仍无语音但音频并非数字静音 → 固定窗口切分兜底,交由识别引擎自行判断
+        _rms = float(np.sqrt(np.mean(audio_data ** 2))) if len(audio_data) else 0.0
+        if _rms > 1e-4 and total_audio_duration_ms <= 60 * 60 * 1000:
+            logger.warning(
+                f'[silero-VAD] 音频非静音(RMS={_rms:.5f})但未检测到语音, 按25s固定窗口切分兜底')
+            _win = 25000
+            return [[s, min(s + _win, total_audio_duration_ms)]
+                    for s in range(0, total_audio_duration_ms, _win)
+                    if min(s + _win, total_audio_duration_ms) > s]
         return []
 
     raw_segments = [
@@ -106,6 +157,21 @@ def get_speech_timestamp_silero(input_wav,
         f"[silero-VAD]: 原始片段数 {len(raw_segments)} -> {len(final_segments)} -> {len(_thrid_segs)} 句子"
     )
 
+    # 安全网: 超长段(VAD在连续背景音乐下可能产出分钟级片段)硬切,防止识别引擎内存爆炸
+    _thrid_segs = _split_oversize_segments(_thrid_segs, max_speech_duration_ms)
+
+    # VAD失效兜底: 远场/混响人声可能只检出零星几段(占比过低),固定窗口切分交由识别引擎判断
+    _cov = sum(e - s for s, e in _thrid_segs) / max(total_audio_duration_ms, 1)
+    if len(_thrid_segs) < 5 and _cov < 0.05:
+        _rms_chk = float(np.sqrt(np.mean(audio_data ** 2))) if len(audio_data) else 0.0
+        if _rms_chk > 1e-4 and total_audio_duration_ms <= 60 * 60 * 1000:
+            logger.warning(
+                f'[silero-VAD] 语音占比过低({_cov * 100:.1f}%,{len(_thrid_segs)}段), VAD可能对该音频失效, 按25s固定窗口切分兜底')
+            _win = 25000
+            return [[s, min(s + _win, total_audio_duration_ms)]
+                    for s in range(0, total_audio_duration_ms, _win)
+                    if min(s + _win, total_audio_duration_ms) > s]
+
     return _thrid_segs
 
 
@@ -141,6 +207,13 @@ def get_speech_timestamp(
     elif data.dtype != np.int16:
         data = data.astype(np.int16)
 
+    # 低音量自动增益: 与 silero 路径一致,峰值归一化到 int16 满幅的 90%
+    _peak = int(np.abs(data).max()) if len(data) else 0
+    if 0 < _peak < 16000:
+        _gain = 29490 / _peak
+        data = np.clip(data.astype(np.int64) * _gain, -32768, 32767).astype(np.int16)
+        logger.warning(f'[Ten-VAD] 低音量音频自动增益 x{_gain:.1f} (峰值{_peak})')
+
     total_audio_duration_ms = int(len(data) / sr * 1000)
 
     # 2. 帧参数计算
@@ -171,6 +244,15 @@ def get_speech_timestamp(
     )
 
     if not raw_frame_segments:
+        # 仍无语音但音频并非数字静音 → 固定窗口切分兜底,交由识别引擎自行判断
+        _rms = float(np.sqrt(np.mean(data.astype(np.float64) ** 2))) if len(data) else 0.0
+        if _rms > 3.0 and total_audio_duration_ms <= 60 * 60 * 1000:
+            logger.warning(
+                f'[Ten-VAD] 音频非静音(RMS={_rms:.1f})但未检测到语音, 按25s固定窗口切分兜底')
+            _win = 25000
+            return [[s, min(s + _win, total_audio_duration_ms)]
+                    for s in range(0, total_audio_duration_ms, _win)
+                    if min(s + _win, total_audio_duration_ms) > s]
         return None
 
     # 5. 转换为毫秒，并加入 speech_pad_ms 边缘补白
@@ -242,6 +324,21 @@ def get_speech_timestamp(
         f"[Ten-VAD] {len(merged_segments)} -> {len(final_segments)} -> {len(_thrid_segs)} 优化"
     )
 
+    # 安全网: 超长段硬切,防止识别引擎内存爆炸
+    _thrid_segs = _split_oversize_segments(_thrid_segs, max_speech_duration_ms)
+
+    # VAD失效兜底: 与 silero 路径一致
+    _cov = sum(e - s for s, e in _thrid_segs) / max(total_audio_duration_ms, 1)
+    if len(_thrid_segs) < 5 and _cov < 0.05:
+        _rms_chk = float(np.sqrt(np.mean(data.astype(np.float64) ** 2))) if len(data) else 0.0
+        if _rms_chk > 3.0 and total_audio_duration_ms <= 60 * 60 * 1000:
+            logger.warning(
+                f'[Ten-VAD] 语音占比过低({_cov * 100:.1f}%,{len(_thrid_segs)}段), 按25s固定窗口切分兜底')
+            _win = 25000
+            return [[s, min(s + _win, total_audio_duration_ms)]
+                    for s in range(0, total_audio_duration_ms, _win)
+                    if min(s + _win, total_audio_duration_ms) > s]
+
     return _thrid_segs
 
 
@@ -249,6 +346,8 @@ def _detect_raw_segments(
     data, threshold, min_silent_frames, max_speech_frames=None
 ):
     """底层 TenVad 逐帧扫描检测"""
+    # 惰性导入：ten_vad 缺失时不影响 silero-VAD 路径
+    from ten_vad import TenVad
     hop_size = 256
     # 实例化底层 TenVad
     ten_vad_instance = TenVad(hop_size, threshold)

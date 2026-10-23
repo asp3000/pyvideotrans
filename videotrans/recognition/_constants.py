@@ -55,6 +55,9 @@ OPENROUTER_API = 30
 MINIMAX_API = 31
 FISHAUDIO_API = 32
 AUDEXUM_API = 33
+# 免费云端API (移植自 VideoCaptioner)
+BCUT_ASR = 34
+JIANYING_ASR = 35
 
 # 允许切换不同模型的渠道
 ALLOW_CHANGE_MODEL = [
@@ -180,7 +183,10 @@ ID_NAME_DICT = {
                                  key_name="audexum_key",
                                  win="audexum",
                                  imp="._audexum"),
-
+    BCUT_ASR: ChannelProvider("Bilibili-Bcut(必剪)",
+                              imp="._bcut"),
+    JIANYING_ASR: ChannelProvider("Jianying(剪映)",
+                                  imp="._jianying"),
 
 }
 # 强制保持按照每个常量值大小排序
